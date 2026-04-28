@@ -1,0 +1,108 @@
+name: Unpack ASAR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  unpack-asar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch latest release info
+        id: release
+        run: |
+          LATEST_JSON=$(curl -s https://api.github.com/repos/dogoran-el/arizona-launcher/releases/latest)
+          echo "version=$(echo "$LATEST_JSON" | jq -r .tag_name)" >> "$GITHUB_OUTPUT"
+          echo "asset_url=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name == "Arizona-Games-Launcher.exe") | .browser_download_url')" >> "$GITHUB_OUTPUT"
+
+      - name: Read local version
+        id: localversion
+        run: |
+          if [[ -f last_version.txt ]]; then
+            echo "last=$(cat last_version.txt)" >> "$GITHUB_OUTPUT"
+          else
+            echo "last=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if update is needed
+        id: check
+        run: |
+          if [[ "${{ steps.release.outputs.version }}" == "${{ steps.localversion.outputs.last }}" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop if up-to-date
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Already up to date. Exiting workflow."
+
+      - name: Install required tools
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full jq
+          sudo npm install -g asar
+
+      - name: Download EXE
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          curl -L "${{ steps.release.outputs.asset_url }}" -o launcher.exe
+
+      - name: Extract all files from EXE
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          mkdir extracted
+          7z x launcher.exe -oextracted
+
+      - name: Extract ASAR and its contents
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          APP7Z=$(find extracted -name "app-32.7z" | head -n1)
+          mkdir extracted/appdata
+          7z x "$APP7Z" -oextracted/appdata
+          mkdir asar_extract
+          asar extract extracted/appdata/resources/app.asar asar_extract
+
+      - name: Beautify JavaScript, CSS и HTML files
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          sudo npm install -g js-beautify
+
+          find asar_extract -name "*.js" -type f -not -path "*/node_modules/*" | while read -r file; do
+            echo "Beautifying JS: $file"
+            js-beautify -r "$file"
+          done
+
+          find asar_extract -name "*.css" -type f -not -path "*/node_modules/*" | while read -r file; do
+            echo "Beautifying CSS: $file"
+            js-beautify -r "$file"
+          done
+
+          find asar_extract -name "*.html" -type f -not -path "*/node_modules/*" | while read -r file; do
+            echo "Beautifying HTML: $file"
+            js-beautify -r "$file"
+          done
+
+      - name: Replace files in root and update version
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' ! -name 'last_version.txt' ! -name 'asar_extract' -exec rm -rf {} +
+
+          shopt -s dotglob
+          mv asar_extract/* .
+          rm -rf asar_extract
+
+          echo "${{ steps.release.outputs.version }}" > last_version.txt
+
+      - name: Commit and push changes
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "Unpacked ASAR version: ${{ steps.release.outputs.version }}"
+          git push
